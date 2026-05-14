@@ -2,7 +2,6 @@ import time
 
 import psycopg2
 from psycopg2 import sql
-import os
 from faker import Faker
 import random
 from tqdm import tqdm
@@ -15,7 +14,6 @@ DB_PARAMS = {
     "user": "postgres",
     "password": "postgres",
 }
-
 
 def setup_database():
     """Run the SQL setup script to create database and tables"""
@@ -304,7 +302,7 @@ def generate_fake_users(num_users=1000000, batch_size=50000):
     return users
 
 
-def insert_users_bulk_postgresql(users, batch_size=50000):
+def insert_users_bulk_postgresql(users, batch_size):
     """Insert users in bulk using PostgreSQL's execute_values"""
     from psycopg2.extras import execute_values
 
@@ -404,11 +402,12 @@ if __name__ == "__main__":
     print("=" * 60)
 
     # Run setup
-    # setup_database()
+    setup_database()
 
     # Generate fake users
-    num_users = 1000000
+    num_users = 100000
     users = generate_fake_users(num_users)
+    batch_size=10000
 
     # Choose insertion method
     print("\n" + "=" * 60)
@@ -416,7 +415,7 @@ if __name__ == "__main__":
     print("  1. Bulk insert using execute_values (faster, recommended)")
     print("  2. Stored procedure batch insert")
 
-    total_inserted = insert_users_bulk_postgresql(users, batch_size=10000)
+    total_inserted = insert_users_bulk_postgresql(users, batch_size)
 
     if total_inserted > 0:
         test_bloom_filter_performance(min(1000, total_inserted))
