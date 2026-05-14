@@ -1,9 +1,13 @@
 import time
+import random
+from typing import Optional
+from math import exp
 
 import psycopg2
 from psycopg2 import sql
 from faker import Faker
 import random
+import mmh3
 from tqdm import tqdm
 
 # Connection parameters (using default postgres superuser)
@@ -14,6 +18,124 @@ DB_PARAMS = {
     "user": "postgres",
     "password": "postgres",
 }
+
+
+class UserBloomFilter:
+    def __init__(self, size: int, num_hashes: int = 4):
+        """
+        Initialize Bloom filter for username lookup
+        
+        size: number of bits in the filter
+        num_hashes: number of hash functions to use
+        """
+        self.size = size
+        self.num_hashes = num_hashes
+        self.bit_array = [0] * size
+    
+    def _hashes(self, username: str):
+        """Generate multiple hash values for the username"""
+        for i in range(self.num_hashes):
+            hash_val = mmh3.hash(username, i) % self.size
+            yield hash_val
+    
+    def add(self, username: str):
+        """Add username to bloom filter"""
+        for hash_val in self._hashes(username):
+            self.bit_array[hash_val] = 1
+    
+    def check(self, username: str) -> bool:
+        """
+        Check if username MIGHT exist in database
+        """
+        for hash_val in self._hashes(username):
+            if self.bit_array[hash_val] == 0:
+                return False
+        return True
+    
+    def get_false_positive_rate(self, n: Optional[int] = None) -> float:
+        """Calculate approximate false positive probability"""
+        k = self.num_hashes
+        m = self.size
+        if n is None:
+            n = sum(self.bit_array)  # Approximate number of items
+        if n == 0:
+            return 0
+        return (1 - exp(-k * n / m)) ** k
+
+
+class UserDatabaseWithBloom:
+    def __init__(self, db_params: dict, bloom_size: int = 10_000_000):
+        """Initialize database connection and bloom filter"""
+        self.conn = psycopg2.connect(**db_params)
+        self.bloom = UserBloomFilter(size=bloom_size, num_hashes=4)
+        self.cursor = self.conn.cursor()
+        self._load_existing_usernames()
+    
+    def _load_existing_usernames(self):
+        """Load all existing usernames into bloom filter"""
+        print(f"{Fore.CYAN}📊 Loading existing users into Bloom filter...")
+        start_time = time.time()
+        
+        self.cursor.execute("SELECT COUNT(*) FROM users")
+        total = self.cursor.fetchone()[0]
+        
+        if total == 0:
+            print(f"{Fore.YELLOW}⚠️ No users found in database.")
+            return
+
+        self.cursor.execute("SELECT username FROM users")
+        
+        # Using a small chunk size for memory efficiency if needed
+        count = 0
+        for row in self.cursor:
+            self.bloom.add(row[0])
+            count += 1
+            if count % 100000 == 0:
+                print(f"  Loaded {count:,} / {total:,} usernames...")
+        
+        elapsed = time.time() - start_time
+        print(f"{Fore.GREEN}✅ Loaded {count:,} usernames in {elapsed:.2f} seconds")
+        print(f"{Fore.CYAN}📈 Estimated false positive rate: ~{self.bloom.get_false_positive_rate(n=count)*100:.2f}%")
+    
+    def query_username(self, username: str) -> dict:
+        """
+        Query username using both Bloom filter and Database for efficiency check
+        """
+        # 1. Bloom Filter Check
+        start_bloom = time.time()
+        bloom_result = self.bloom.check(username)
+        bloom_time = time.time() - start_bloom
+        
+        db_result = False
+        db_time = 0.0
+        status = ""
+        
+        # 2. Database Check (only if Bloom says yes)
+        if bloom_result:
+            start_db = time.time()
+            self.cursor.execute("SELECT EXISTS(SELECT 1 FROM users WHERE username = %s)", (username,))
+            db_result = self.cursor.fetchone()[0]
+            db_time = time.time() - start_db
+            
+            if db_result:
+                status = "Confirmed (True Positive)"
+            else:
+                status = "False Positive"
+        else:
+            status = "Definitively Not Found (Filtered)"
+            
+        return {
+            "username": username,
+            "bloom_result": bloom_result,
+            "bloom_time_ms": bloom_time * 1000,
+            "db_result": db_result,
+            "db_time_ms": db_time * 1000 if bloom_result else None,
+            "status": status
+        }
+
+    def close(self):
+        self.cursor.close()
+        self.conn.close()
 
 def setup_database():
     """Run the SQL setup script to create database and tables"""
@@ -405,9 +527,9 @@ if __name__ == "__main__":
     setup_database()
 
     # Generate fake users
-    num_users = 100000
+    num_users = 1000000
     users = generate_fake_users(num_users)
-    batch_size=10000
+    batch_size=5000
 
     # Choose insertion method
     print("\n" + "=" * 60)
